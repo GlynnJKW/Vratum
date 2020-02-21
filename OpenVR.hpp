@@ -17,7 +17,8 @@ private:
 	std::vector<Object*> mObjects;
 	uint64_t mFrameNum;
 
-	Texture* mMirrorTex;
+	Texture* mLeftEye;
+	Texture* mRightEye;
 
 public:
 	PLUGIN_EXPORT OpenVR();

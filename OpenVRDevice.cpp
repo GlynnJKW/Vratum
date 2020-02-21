@@ -26,7 +26,7 @@ OpenVRDevice::OpenVRDevice(float near, float far)
 }
 
 OpenVRDevice::~OpenVRDevice() {
-
+	vr::VR_Shutdown();
 }
 
 void OpenVRDevice::Init() {

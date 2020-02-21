@@ -19,7 +19,9 @@ OpenVR::~OpenVR() {
 	mScene->RemoveObject(mCameraBase);
 	for (Object* obj : mObjects)
 		mScene->RemoveObject(obj);
-	delete mMirrorTex;
+	delete mLeftEye;
+	delete mRightEye;
+	delete mVRDevice;
 }
 
 void OpenVR::PreInstanceInit(Instance* instance)
@@ -31,12 +33,8 @@ void OpenVR::PreInstanceInit(Instance* instance)
 		instance->RequestInstanceExtension(ex);
 	}
 
-	uint64_t device;
-	vr::VRSystem()->GetOutputDevice(&device, vr::TextureType_Vulkan, (VkInstance_T*)instance);
-
 	//instance->RequestInstanceExtension(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
-	instance->RequestInstanceExtension(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
-
+	instance->RequestInstanceExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 }
 
 void OpenVR::PreDeviceInit(Instance* instance, VkPhysicalDevice device)
@@ -49,9 +47,20 @@ void OpenVR::PreDeviceInit(Instance* instance, VkPhysicalDevice device)
 	}
 
 	instance->RequestDeviceExtension(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+	//instance->RequestDeviceExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 }
 
 bool OpenVR::Init(Scene* scene) {
+
+	VkInstance i = *scene->Instance();
+	uint64_t device;
+	vr::VRSystem()->GetOutputDevice(&device, vr::TextureType_Vulkan, i);
+	printf("vrdevice: %d\n", device);
+
+	PFN_vkGetPhysicalDeviceProperties2KHR phys = (PFN_vkGetPhysicalDeviceProperties2KHR)vkGetInstanceProcAddr(*scene->Instance(), "vkGetPhysicalDeviceProperties2KHR");
+	printf("YAAS: %x\n", phys);
+
+
 
 	mScene = scene;
 	mInput = mScene->InputManager()->GetFirst<MouseKeyboardInput>();
@@ -242,7 +251,8 @@ bool OpenVR::Init(Scene* scene) {
 	camera->Far(1024.f);
 	camera->FieldOfView(radians(65.f));
 	camera->LocalPosition(0, 0, 0);
-	//camera->
+	camera->FramebufferWidth(renderWidth);
+	camera->FramebufferHeight(renderHeight);
 	mCamera = camera.get();
 	mCameraBase->AddChild(mCamera);
 
@@ -267,11 +277,17 @@ bool OpenVR::Init(Scene* scene) {
 #pragma endregion
 
 	VkImageUsageFlags flags = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-	mMirrorTex = new Texture("Mirror Texture", 
+	mLeftEye = new Texture("Left Eye Texture", 
 		scene->Instance()->Device(), 
-		mCamera->FramebufferWidth(), mCamera->FramebufferHeight(), 1, 
+		mCamera->FramebufferWidth() / 2, mCamera->FramebufferHeight(), 1, 
 		VK_FORMAT_R8G8B8A8_SRGB,
 		VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL, 
+		flags);
+	mRightEye = new Texture("Right Eye Texture",
+		scene->Instance()->Device(),
+		mCamera->FramebufferWidth() / 2, mCamera->FramebufferHeight(), 1,
+		VK_FORMAT_R8G8B8A8_SRGB,
+		VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
 		flags);
 
 	return true;
@@ -319,10 +335,11 @@ void OpenVR::PostProcess(CommandBuffer* commandBuffer, Camera* camera) {
 	//mCamera->Resolve(commandBuffer);
 	VkPipelineStageFlags srcStage, dstStage, srcStage2, dstStage2;
 	//mCamera->ResolveBuffer()->TransitionImageLayout(VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, commandBuffer);
-	VkImageMemoryBarrier barrier[2] = {};
+	VkImageMemoryBarrier barrier[3] = {};
 	barrier[0] = mCamera->ResolveBuffer()->TransitionImageLayout(VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, srcStage, dstStage);
-	barrier[1] = mMirrorTex->TransitionImageLayout(VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, srcStage2, dstStage2);
-	
+	barrier[1] = mLeftEye->TransitionImageLayout(VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, srcStage2, dstStage2);
+	barrier[2] = mRightEye->TransitionImageLayout(VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, srcStage2, dstStage2);
+
 	srcStage = srcStage | srcStage2;
 	dstStage = dstStage | dstStage2;
 	vkCmdPipelineBarrier(*commandBuffer,
@@ -330,7 +347,9 @@ void OpenVR::PostProcess(CommandBuffer* commandBuffer, Camera* camera) {
 		0,
 		0, nullptr,
 		0, nullptr,
-		2, barrier);
+		3, barrier);
+
+
 
 	VkImageSubresourceLayers srcLayers = {};
 	srcLayers.baseArrayLayer = 0;
@@ -343,20 +362,36 @@ void OpenVR::PostProcess(CommandBuffer* commandBuffer, Camera* camera) {
 	dstLayers.mipLevel = 0;
 	dstLayers.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	VkExtent3D extent = {};
-	extent.width = mCamera->ResolveBuffer()->Width();
-	extent.height = mCamera->ResolveBuffer()->Height();
-	extent.depth = mCamera->ResolveBuffer()->Depth();
+	extent.width = mLeftEye->Width();
+	extent.height = mLeftEye->Height();
+	extent.depth = mLeftEye->Depth();
+
+	VkOffset3D rightOffset = {};
+	rightOffset.x = mLeftEye->Width();
+	rightOffset.y = 0;
+	rightOffset.z = 0;
 
 	VkImageCopy copy = {};
 	copy.srcSubresource = srcLayers;
 	copy.dstSubresource = dstLayers;
 	copy.extent = extent;
-	//copy.
-	vkCmdCopyImage(*commandBuffer, mCamera->ResolveBuffer()->Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mMirrorTex->Image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+	VkImageCopy copy2 = {};
+	copy2.srcSubresource = srcLayers;
+	copy2.dstSubresource = dstLayers;
+	copy2.extent = extent;
+	copy2.srcOffset = rightOffset;
 
-	VkImageMemoryBarrier barrier2[2] = {};
+	//copy.
+	vkCmdCopyImage(*commandBuffer, mCamera->ResolveBuffer()->Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mLeftEye->Image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+	vkCmdCopyImage(*commandBuffer, mCamera->ResolveBuffer()->Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mRightEye->Image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy2);
+
+
+
+
+	VkImageMemoryBarrier barrier2[3] = {};
 	barrier2[0] = mCamera->ResolveBuffer()->TransitionImageLayout(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, srcStage, dstStage);
-	barrier2[1] = mMirrorTex->TransitionImageLayout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, srcStage2, dstStage2);
+	barrier2[1] = mLeftEye->TransitionImageLayout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, srcStage2, dstStage2);
+	barrier2[2] = mLeftEye->TransitionImageLayout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, srcStage2, dstStage2);
 
 	srcStage = srcStage | srcStage2;
 	dstStage = dstStage | dstStage2;
@@ -365,68 +400,67 @@ void OpenVR::PostProcess(CommandBuffer* commandBuffer, Camera* camera) {
 		0,
 		0, nullptr,
 		0, nullptr,
-		2, barrier2);
+		3, barrier2);
 		
 }
 
 void OpenVR::PreSwap()
 {
-	Texture* tex = mMirrorTex;
-
+	/*
 	// Submit to SteamVR
 	vr::VRTextureBounds_t leftBounds;
 	leftBounds.uMin = 0.0f;
-	leftBounds.uMax = 0.5f;
-	leftBounds.vMin = 0.0f;
+	leftBounds.uMax = 1.0f;
+	leftBounds.vMin = 0.5f;
 	leftBounds.vMax = 1.0f;
 
 	vr::VRTextureBounds_t rightBounds;
-	rightBounds.uMin = 0.5f;
+	rightBounds.uMin = 0.0f;
 	rightBounds.uMax = 1.0f;
-	rightBounds.vMin = 0.0f;
+	rightBounds.vMin = 0.5f;
 	rightBounds.vMax = 1.0f;
-
+	*/
 	//tex->TransitionImageLayout(VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, commandBuffer);
 
-	vr::VRVulkanTextureData_t vulkanData;
-	vulkanData.m_nImage = (uint64_t)(tex->Image());
-	vulkanData.m_pDevice = (VkDevice_T*)mScene->Instance()->Device();
-	vulkanData.m_pPhysicalDevice = (VkPhysicalDevice_T*)mScene->Instance()->Device()->PhysicalDevice();
-	vulkanData.m_pInstance = (VkInstance_T*)mScene->Instance()->Device()->Instance();
-	vulkanData.m_pQueue = (VkQueue_T*)mScene->Instance()->Device()->GraphicsQueue();
-	vulkanData.m_nQueueFamilyIndex = mScene->Instance()->Device()->GraphicsQueueFamily();
+	vr::VRVulkanTextureData_t vulkanDataLeft;
+	vulkanDataLeft.m_nImage = (uint64_t)(mLeftEye->Image());
+	vulkanDataLeft.m_pDevice = *mScene->Instance()->Device();
+	vulkanDataLeft.m_pPhysicalDevice = mScene->Instance()->Device()->PhysicalDevice();
+	vulkanDataLeft.m_pInstance = *mScene->Instance()->Device()->Instance();
+	vulkanDataLeft.m_pQueue = mScene->Instance()->Device()->GraphicsQueue();
+	vulkanDataLeft.m_nQueueFamilyIndex = mScene->Instance()->Device()->GraphicsQueueFamily();
 
-	vulkanData.m_nHeight = tex->Height();
-	vulkanData.m_nWidth = tex->Width();
-	vulkanData.m_nFormat = tex->Format();
-	vulkanData.m_nSampleCount = tex->SampleCount();
+	vulkanDataLeft.m_nHeight = mLeftEye->Height();
+	vulkanDataLeft.m_nWidth = mLeftEye->Width();
+	vulkanDataLeft.m_nFormat = mLeftEye->Format();
+	vulkanDataLeft.m_nSampleCount = mLeftEye->SampleCount();
 
-	vr::Texture_t texture = { &vulkanData, vr::TextureType_Vulkan, vr::ColorSpace_Gamma };
+	vr::Texture_t textureLeft = { &vulkanDataLeft, vr::TextureType_Vulkan, vr::ColorSpace_Gamma };
+
+	vr::VRVulkanTextureData_t vulkanDataRight;
+	vulkanDataRight.m_nImage = (uint64_t)(mRightEye->Image());
+	vulkanDataRight.m_pDevice = *mScene->Instance()->Device();
+	vulkanDataRight.m_pPhysicalDevice = mScene->Instance()->Device()->PhysicalDevice();
+	vulkanDataRight.m_pInstance = *mScene->Instance()->Device()->Instance();
+	vulkanDataRight.m_pQueue = mScene->Instance()->Device()->GraphicsQueue();
+	vulkanDataRight.m_nQueueFamilyIndex = mScene->Instance()->Device()->GraphicsQueueFamily();
+
+	vulkanDataRight.m_nHeight = mRightEye->Height();
+	vulkanDataRight.m_nWidth = mRightEye->Width();
+	vulkanDataRight.m_nFormat = mRightEye->Format();
+	vulkanDataRight.m_nSampleCount = mRightEye->SampleCount();
+
+	vr::Texture_t textureRight = { &vulkanDataRight, vr::TextureType_Vulkan, vr::ColorSpace_Gamma };
+
+
+
 	vr::EVRCompositorError error;
-	error = vr::VRCompositor()->Submit(vr::Eye_Left, &texture, nullptr);
+	error = vr::VRCompositor()->Submit(vr::Eye_Left, &textureLeft, nullptr);
 	if (error != vr::VRCompositorError_None)
 	{
-		if (error == vr::VRCompositorError_TextureUsesUnsupportedFormat)
-		{
-			printf_color(COLOR_RED, "Texture format unsupported: %s\n", FormatToString(tex->Format()));
-
-			if (tex->Usage() & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
-				printf_color(COLOR_RED, "TRANSFER_SRC_BIT, ");
-			if (tex->Usage() & VK_IMAGE_USAGE_TRANSFER_DST_BIT)
-				printf_color(COLOR_RED, "TRANSFER_DST_BIT, ");
-			if (tex->Usage() & VK_IMAGE_USAGE_SAMPLED_BIT)
-				printf_color(COLOR_RED, "SAMPLED_BIT, ");
-			if (tex->Usage() & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
-				printf_color(COLOR_RED, "COLOR_ATTACHMENT_BIT, ");
-			printf("\n");
-			printf_color(COLOR_RED, "Texture name: %s, mips: %d\nsamples: %d\n", tex->mName, tex->MipLevels(), tex->SampleCount());
-		}
-		else
-		{
-			printf_color(COLOR_RED, "Compositor error on left eye submission: %d\n", error);
-		}
+		printf_color(COLOR_RED, "Compositor error on left eye submission: %d\n", error);
 	}
-	vr::VRCompositor()->Submit(vr::Eye_Right, &texture, &rightBounds);
+	vr::VRCompositor()->Submit(vr::Eye_Right, &textureRight, nullptr);
 	if (error != vr::VRCompositorError_None)
 	{
 		//printf_color(COLOR_RED, "Compositor error on right eye submission: %d\n", error);
